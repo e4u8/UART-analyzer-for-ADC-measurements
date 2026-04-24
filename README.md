@@ -1,7 +1,7 @@
 # UART ADC Analyzer (DA14706)
 
 ## Overview
-Real-time plotting of 2 ADC channels (CH0, CH1) from DA14706 via UART, with basic stats (min, max, peak to peak, RMS).
+Real-time plotting of 2 ADC channels (CH0, CH1) from DA14706 via UART, with basic stats (min, max, peak to peak, RMS, current and mean value).
 
 ## Requirements
 - Python 3
