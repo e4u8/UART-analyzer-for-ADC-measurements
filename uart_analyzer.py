@@ -1,7 +1,12 @@
 import serial
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import numpy as np 
 from collections import deque
+
+# Running mean accumulators — store ALL samples received, not just the visible window
+ch0_all = []
+ch1_all = []
 
 # ── Configuration — edit these as needed ──────────────────────────────────────
 PORT     = "COM7"    # Change to your current COM port
@@ -87,6 +92,8 @@ def update(frame):
                 mv0, mv1 = result
                 ch0_mv.append(mv0)
                 ch1_mv.append(mv1)
+                ch0_all.append(mv0)   # accumulate for mean
+                ch1_all.append(mv1)
                 sample_count += 1
         except Exception as e:
             print(f"Read error: {e}")
@@ -95,17 +102,31 @@ def update(frame):
     line1.set_data(range(WINDOW), ch1_mv)
 
     # Compute live stats from the visible window
-    if len(ch0_mv) > 0:
+    if len(ch0_all) > 0:
         import math
+
         c0 = list(ch0_mv)
         c1 = list(ch1_mv)
+
+        # Current value = last received sample
+        cur0 = c0[-1]
+        cur1 = c1[-1]
+
+        # Running mean over ALL samples since start
+        mean0 = sum(ch0_all) / len(ch0_all)
+        mean1 = sum(ch1_all) / len(ch1_all)
+
+        # RMS over visible window
         rms0 = math.sqrt(sum(x*x for x in c0) / len(c0))
         rms1 = math.sqrt(sum(x*x for x in c1) / len(c1))
+
         stats_text.set_text(
             f"samples received: {sample_count}\n"
-            f"[CH0] min={min(c0):.0f} mV  max={max(c0):.0f} mV  "
+            f"[CH0] current={cur0:.1f} mV  mean={mean0:.1f} mV  "
+            f"min={min(c0):.0f} mV  max={max(c0):.0f} mV  "
             f"pp={max(c0)-min(c0):.0f} mV  rms={rms0:.1f} mV\n"
-            f"[CH1] min={min(c1):.0f} mV  max={max(c1):.0f} mV  "
+            f"[CH1] current={cur1:.1f} mV  mean={mean1:.1f} mV  "
+            f"min={min(c1):.0f} mV  max={max(c1):.0f} mV  "
             f"pp={max(c1)-min(c1):.0f} mV  rms={rms1:.1f} mV"
         )
 
