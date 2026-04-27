@@ -1,12 +1,21 @@
 import serial
+import math
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np 
+import time
 from collections import deque
 
 # Running mean accumulators — store ALL samples received, not just the visible window
 ch0_all = []
 ch1_all = []
+rate_window_count = 0
+rate_window_start = time.time()
+measured_rate_hz  = 0.0
+measured_freq_hz  = 0.0   
+prev_sample_ch1   = 0.0
+zero_cross_samples = []   # stores sample_count value at each crossing
+MIDPOINT_MV       = 1600  # midpoint of your 200mV-3000mV signal
 
 # ── Configuration — edit these as needed ──────────────────────────────────────
 PORT     = "COM7"    # Change to your current COM port
@@ -82,7 +91,8 @@ def parse_line(raw_line: str):
 
 # --- Animation update function -----------------------------------------------
 def update(frame):
-    global sample_count
+    global sample_count, rate_window_count, rate_window_start
+    global measured_rate_hz, measured_freq_hz, prev_sample_ch1
 
     while ser.in_waiting:
         try:
@@ -92,8 +102,29 @@ def update(frame):
                 mv0, mv1 = result
                 ch0_mv.append(mv0)
                 ch1_mv.append(mv1)
+                # Detect rising zero-crossing (signal crosses midpoint upward)
+                if prev_sample_ch1 < MIDPOINT_MV and mv1 >= MIDPOINT_MV:
+                    zero_cross_samples.append(sample_count)
+                    if len(zero_cross_samples) > 6:
+                        zero_cross_samples.pop(0)
+                    # Need at least 2 crossings and a valid sample rate to compute frequency
+                    if len(zero_cross_samples) >= 2 and measured_rate_hz > 0:
+                        gaps = [zero_cross_samples[i+1] - zero_cross_samples[i]
+                                for i in range(len(zero_cross_samples)-1)]
+                        avg_gap_samples = sum(gaps) / len(gaps)
+                        measured_freq_hz = measured_rate_hz / avg_gap_samples
+
+                prev_sample_ch1 = mv1
                 ch0_all.append(mv0)   # accumulate for mean
                 ch1_all.append(mv1)
+                rate_window_count += 1
+                now = time.time()
+                elapsed = now - rate_window_start
+                if elapsed >= 2.0:   # measure over 2 seconds for stability
+                    measured_rate_hz  = rate_window_count / elapsed
+                    rate_window_count = 0
+                    rate_window_start = now
+
                 sample_count += 1
         except Exception as e:
             print(f"Read error: {e}")
@@ -103,8 +134,6 @@ def update(frame):
 
     # Compute live stats from the visible window
     if len(ch0_all) > 0:
-        import math
-
         c0 = list(ch0_mv)
         c1 = list(ch1_mv)
 
@@ -122,6 +151,8 @@ def update(frame):
 
         stats_text.set_text(
             f"samples received: {sample_count}\n"
+            f"sample rate: {measured_rate_hz:.1f} Hz\n"
+            f"signal freq: {measured_freq_hz:.2f} Hz\n"
             f"[CH0] current={cur0:.1f} mV  mean={mean0:.1f} mV  "
             f"min={min(c0):.0f} mV  max={max(c0):.0f} mV  "
             f"pp={max(c0)-min(c0):.0f} mV  rms={rms0:.1f} mV\n"
