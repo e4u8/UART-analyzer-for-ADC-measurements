@@ -2,48 +2,47 @@ import serial
 import math
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import numpy as np 
+import numpy as np
 import time
 from collections import deque
 
-# Running mean accumulators — store ALL samples received, not just the visible window
+# Running mean accumulators
 ch0_all = []
 ch1_all = []
 rate_window_count = 0
 rate_window_start = time.time()
 measured_rate_hz  = 0.0
-measured_freq_hz  = 0.0   
+measured_freq_hz  = 0.0
 prev_sample_ch1   = 0.0
-zero_cross_samples = []   # stores sample_count value at each crossing
-MIDPOINT_MV       = 1600  # midpoint of your 200mV-3000mV signal
+zero_cross_samples = []
+MIDPOINT_MV       = 1600
 
-# ── Configuration — edit these as needed ──────────────────────────────────────
-PORT     = "COM7"    # Change to your current COM port
-BAUD     = 115200    # Must match your MCU's baud rate
-WINDOW   = 200       # How many samples are visible in the plot at once
-CH0_YMAX = 3300      # Expected max mV for CH0 (voltage signal)
-CH1_YMAX = 3300      # Expected max mV for CH1 (current signal) — adjust once you know the range
-# ──────────────────────────────────────────────────────────────────────────────
+# ── NEW: Temperature/Humidity accumulators ────────────────────────────────────
+temp_all     = []   # stores all received temperature values (float °C)
+humid_all    = []   # stores all received humidity values (int %)
+latest_temp  = None
+latest_humid = None
+# ─────────────────────────────────────────────────────────────────────────────
 
-# --- Serial connection --------------------------------------------------------
+# ── Configuration ─────────────────────────────────────────────────────────────
+PORT     = "COM7"
+BAUD     = 115200
+WINDOW   = 200
+CH0_YMAX = 3300
+CH1_YMAX = 3300
+# ─────────────────────────────────────────────────────────────────────────────
+
 try:
     ser = serial.Serial(PORT, BAUD, timeout=0.1)
     print(f"Connected to {PORT} at {BAUD} baud.")
 except serial.SerialException as e:
-    print(f"ERROR: Could not open {PORT}. Check the port name and that your MCU is connected.")
-    print(f"Details: {e}")
+    print(f"ERROR: Could not open {PORT}.\nDetails: {e}")
     exit(1)
 
-# --- Data buffers -------------------------------------------------------------
 ch0_mv = deque([0.0] * WINDOW, maxlen=WINDOW)
 ch1_mv = deque([0.0] * WINDOW, maxlen=WINDOW)
-
-# Live stats computed by the analyzer itself (no longer from MCU)
 sample_count = 0
-stats = {"ch0_min": 0, "ch0_max": 0, "ch0_rms": 0,
-         "ch1_min": 0, "ch1_max": 0, "ch1_rms": 0}
 
-# --- Plot setup --------------------------------------------------------------
 fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(13, 7))
 fig.suptitle(f"UART ADC Analyzer  —  {PORT} @ {BAUD}", fontsize=13)
 
@@ -63,51 +62,88 @@ ax1.set_ylabel("mV")
 ax1.axhline(0, color="gray", linewidth=0.5, linestyle="--")
 ax1.legend(loc="upper right")
 
-# Stats text shown at the bottom of the figure 
 stats_text = fig.text(
     0.01, 0.01,
     "Waiting for data...",
     fontsize=8, family="monospace", verticalalignment="bottom"
 )
 
-# --- Parsing -----------------------------------------------------------------
+# ── NEW: Temperature display box in top-right corner ─────────────────────────
+temp_text = fig.text(
+    0.75, 0.01,
+    "Temp: --.-°C   Humidity: --%",
+    fontsize=9, family="monospace", verticalalignment="bottom",
+    color="white",
+    bbox=dict(boxstyle="round,pad=0.4", facecolor="#2a5f2a", edgecolor="green")
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def parse_line(raw_line: str):
     """
-    Expects only the new MCU format: mv_ch0,mv_ch1
-    Returns (float, float) or None on any parse failure.
-    Silently ignores header/status lines starting with '[' or '*'.
+    Accepts two formats:
+      Old (2 fields): mv_ch0,mv_ch1
+      New (4 fields): mv_ch0,mv_ch1,temp_raw,humidity
+        where temp_raw = temp_celsius * 10  (e.g. 21.5°C → 215)
+
+    Returns (mv0, mv1, temp_c, humidity) or (mv0, mv1, None, None)
+    or None on parse failure.
     """
     line = raw_line.strip()
     if not line or line.startswith("[") or line.startswith("*"):
         return None
 
     parts = line.split(",")
-    if len(parts) == 2:
+
+    # 4-field format (ADC + temperature)
+    if len(parts) == 4:
         try:
-            return float(parts[0]), float(parts[1])
+            mv0      = float(parts[0])
+            mv1      = float(parts[1])
+            temp_c   = int(parts[2]) / 10.0   # convert back from *10 integer
+            humidity = int(parts[3])
+            return mv0, mv1, temp_c, humidity
         except ValueError:
             pass
+
+    # 2-field format (ADC only — backwards compatible)
+    if len(parts) == 2:
+        try:
+            return float(parts[0]), float(parts[1]), None, None
+        except ValueError:
+            pass
+
     return None
 
-# --- Animation update function -----------------------------------------------
 def update(frame):
     global sample_count, rate_window_count, rate_window_start
     global measured_rate_hz, measured_freq_hz, prev_sample_ch1
+    global latest_temp, latest_humid
 
     while ser.in_waiting:
         try:
-            raw = ser.readline().decode("utf-8", errors="replace")
+            raw    = ser.readline().decode("utf-8", errors="replace")
             result = parse_line(raw)
             if result:
-                mv0, mv1 = result
+                mv0, mv1, temp_c, humidity = result
+
                 ch0_mv.append(mv0)
                 ch1_mv.append(mv1)
-                # Detect rising zero-crossing (signal crosses midpoint upward)
+                ch0_all.append(mv0)
+                ch1_all.append(mv1)
+
+                # ── NEW: store temperature if present ─────────────────────────
+                if temp_c is not None:
+                    latest_temp  = temp_c
+                    latest_humid = humidity
+                    temp_all.append(temp_c)
+                    humid_all.append(humidity)
+                # ─────────────────────────────────────────────────────────────
+
+                # Zero-crossing frequency detection (unchanged)
                 if prev_sample_ch1 < MIDPOINT_MV and mv1 >= MIDPOINT_MV:
                     zero_cross_samples.append(sample_count)
-                    if len(zero_cross_samples) > 6:
+                    if len(zero_cross_samples) > 12:
                         zero_cross_samples.pop(0)
-                    # Need at least 2 crossings and a valid sample rate to compute frequency
                     if len(zero_cross_samples) >= 2 and measured_rate_hz > 0:
                         gaps = [zero_cross_samples[i+1] - zero_cross_samples[i]
                                 for i in range(len(zero_cross_samples)-1)]
@@ -115,39 +151,33 @@ def update(frame):
                         measured_freq_hz = measured_rate_hz / avg_gap_samples
 
                 prev_sample_ch1 = mv1
-                ch0_all.append(mv0)   # accumulate for mean
-                ch1_all.append(mv1)
+
                 rate_window_count += 1
-                now = time.time()
+                now     = time.time()
                 elapsed = now - rate_window_start
-                if elapsed >= 2.0:   # measure over 2 seconds for stability
+                if elapsed >= 2.0:
                     measured_rate_hz  = rate_window_count / elapsed
                     rate_window_count = 0
                     rate_window_start = now
 
                 sample_count += 1
+
         except Exception as e:
             print(f"Read error: {e}")
 
     line0.set_data(range(WINDOW), ch0_mv)
     line1.set_data(range(WINDOW), ch1_mv)
 
-    # Compute live stats from the visible window
     if len(ch0_all) > 0:
         c0 = list(ch0_mv)
         c1 = list(ch1_mv)
 
-        # Current value = last received sample
-        cur0 = c0[-1]
-        cur1 = c1[-1]
-
-        # Running mean over ALL samples since start
+        cur0  = c0[-1]
+        cur1  = c1[-1]
         mean0 = sum(ch0_all) / len(ch0_all)
         mean1 = sum(ch1_all) / len(ch1_all)
-
-        # RMS over visible window
-        rms0 = math.sqrt(sum(x*x for x in c0) / len(c0))
-        rms1 = math.sqrt(sum(x*x for x in c1) / len(c1))
+        rms0  = math.sqrt(sum(x*x for x in c0) / len(c0))
+        rms1  = math.sqrt(sum(x*x for x in c1) / len(c1))
 
         stats_text.set_text(
             f"samples received: {sample_count}\n"
@@ -161,11 +191,20 @@ def update(frame):
             f"pp={max(c1)-min(c1):.0f} mV  rms={rms1:.1f} mV"
         )
 
-    return line0, line1, stats_text
+        # ── NEW: update temperature display ───────────────────────────────────
+        if latest_temp is not None:
+            mean_temp  = sum(temp_all)  / len(temp_all)
+            mean_humid = sum(humid_all) / len(humid_all)
+            temp_text.set_text(
+                f"Temp:     {latest_temp:.1f} °C  (mean: {mean_temp:.1f})\n"
+                f"Humidity: {latest_humid} %      (mean: {mean_humid:.1f})"
+            )
+        # ─────────────────────────────────────────────────────────────────────
 
-# --- Run ---------------------------------------------------------------------
+    return line0, line1, stats_text, temp_text
+
 ani = animation.FuncAnimation(fig, update, interval=20, blit=False, cache_frame_data=False)
-plt.tight_layout(rect=[0, 0.09, 1, 1])
+plt.tight_layout(rect=[0, 0.11, 1, 1])
 
 try:
     plt.show()
